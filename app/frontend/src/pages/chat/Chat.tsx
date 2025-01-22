@@ -370,7 +370,7 @@ const Chat = () => {
                 <div className={styles.chatContainer}>
                     {!lastQuestionRef.current ? (
                         <div className={styles.chatEmptyState}>
-                            <img src="/assets/CALottLogo.svg" alt="Lottery logo" style={{ width: "120px", height: "120px" }} />
+                            <img src="CALottLogo.svg" alt="Lottery logo" style={{ width: "120px", height: "120px" }} />
                             <h1 className={styles.chatEmptyStateTitle}>{t("chatEmptyStateTitle")}</h1>
                             <h2 className={styles.chatEmptyStateSubtitle}>{t("chatEmptyStateSubtitle")}</h2>
                             {showLanguagePicker && <LanguagePicker onLanguageChange={newLang => i18n.changeLanguage(newLang)} />}
