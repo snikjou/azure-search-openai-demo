@@ -1,19 +1,22 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { createHashRouter, RouterProvider } from "react-router-dom";
+import { I18nextProvider } from "react-i18next";
+import { HelmetProvider } from "react-helmet-async";
 import { initializeIcons } from "@fluentui/react";
 
 import "./index.css";
 
-import Layout from "./pages/layout/Layout";
 import Chat from "./pages/chat/Chat";
+import LayoutWrapper from "./layoutWrapper";
+import i18next from "./i18n/config";
 
 initializeIcons();
 
 const router = createHashRouter([
     {
         path: "/",
-        element: <Layout />,
+        element: <LayoutWrapper />,
         children: [
             {
                 index: true,
@@ -21,7 +24,7 @@ const router = createHashRouter([
             },
             {
                 path: "qa",
-                lazy: () => import("./pages/oneshot/OneShot")
+                lazy: () => import("./pages/ask/Ask")
             },
             {
                 path: "*",
@@ -33,6 +36,10 @@ const router = createHashRouter([
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-        <RouterProvider router={router} />
+        <I18nextProvider i18n={i18next}>
+            <HelmetProvider>
+                <RouterProvider router={router} />
+            </HelmetProvider>
+        </I18nextProvider>
     </React.StrictMode>
 );

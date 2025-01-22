@@ -1,108 +1,150 @@
-import openai
+from typing import Any, Optional
 
-from approaches.approach import Approach
-from azure.search.documents import SearchClient
-from azure.search.documents.models import QueryType
-from text import nonewlines
-from typing import Any
+from azure.search.documents.aio import SearchClient
+from azure.search.documents.models import VectorQuery
+from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageParam
+from openai_messages_token_helper import get_token_limit
 
-from core.messagebuilder import MessageBuilder
+from approaches.approach import Approach, ThoughtStep
+from approaches.promptmanager import PromptManager
+from core.authentication import AuthenticationHelper
+
 
 class RetrieveThenReadApproach(Approach):
     """
-    Simple retrieve-then-read implementation, using the Cognitive Search and OpenAI APIs directly. It first retrieves
+    Simple retrieve-then-read implementation, using the AI Search and OpenAI APIs directly. It first retrieves
     top documents from search, then constructs a prompt with them, and then uses OpenAI to generate an completion
     (answer) with that prompt.
     """
 
-    system_chat_template = \
-"You are an intelligent assistant helping Contoso Inc employees with their healthcare plan questions and employee handbook questions. " + \
-"Use 'you' to refer to the individual asking the questions even if they ask with 'I'. " + \
-"Answer the following question using only the data provided in the sources below. " + \
-"For tabular information return it as an html table. Do not return markdown format. "  + \
-"Each source has a name followed by colon and the actual information, always include the source name for each fact you use in the response. " + \
-"If you cannot answer using the sources below, say you don't know. Use below example to answer"
-
-    #shots/sample conversation
-    question = """
-'What is the deductible for the employee plan for a visit to Overlake in Bellevue?' 
-
-Sources:
-info1.txt: deductibles depend on whether you are in-network or out-of-network. In-network deductibles are $500 for employee and $1000 for family. Out-of-network deductibles are $1000 for employee and $2000 for family.
-info2.pdf: Overlake is in-network for the employee plan.
-info3.pdf: Overlake is the name of the area that includes a park and ride near Bellevue.
-info4.pdf: In-network institutions include Overlake, Swedish and others in the region
-"""
-    answer = "In-network deductibles are $500 for employee and $1000 for family [info1.txt] and Overlake is in-network for the employee plan [info2.pdf][info4.pdf]."
-
-    def __init__(self, search_client: SearchClient, openai_deployment: str, chatgpt_model: str, embedding_deployment: str, sourcepage_field: str, content_field: str):
+    def __init__(
+        self,
+        *,
+        search_client: SearchClient,
+        auth_helper: AuthenticationHelper,
+        openai_client: AsyncOpenAI,
+        chatgpt_model: str,
+        chatgpt_deployment: Optional[str],  # Not needed for non-Azure OpenAI
+        embedding_model: str,
+        embedding_deployment: Optional[str],  # Not needed for non-Azure OpenAI or for retrieval_mode="text"
+        embedding_dimensions: int,
+        sourcepage_field: str,
+        content_field: str,
+        query_language: str,
+        query_speller: str,
+        prompt_manager: PromptManager,
+    ):
         self.search_client = search_client
-        self.openai_deployment = openai_deployment
+        self.chatgpt_deployment = chatgpt_deployment
+        self.openai_client = openai_client
+        self.auth_helper = auth_helper
         self.chatgpt_model = chatgpt_model
+        self.embedding_model = embedding_model
+        self.embedding_dimensions = embedding_dimensions
+        self.chatgpt_deployment = chatgpt_deployment
         self.embedding_deployment = embedding_deployment
         self.sourcepage_field = sourcepage_field
         self.content_field = content_field
+        self.query_language = query_language
+        self.query_speller = query_speller
+        self.chatgpt_token_limit = get_token_limit(chatgpt_model, self.ALLOW_NON_GPT_MODELS)
+        self.prompt_manager = prompt_manager
+        self.answer_prompt = self.prompt_manager.load_prompt("ask_answer_question.prompty")
 
-    def run(self, q: str, overrides: dict[str, Any]) -> Any:
-        has_text = overrides.get("retrieval_mode") in ["text", "hybrid", None]
-        has_vector = overrides.get("retrieval_mode") in ["vectors", "hybrid", None]
-        use_semantic_captions = True if overrides.get("semantic_captions") and has_text else False
-        top = overrides.get("top") or 3
-        exclude_category = overrides.get("exclude_category") or None
-        filter = "category ne '{}'".format(exclude_category.replace("'", "''")) if exclude_category else None
+    async def run(
+        self,
+        messages: list[ChatCompletionMessageParam],
+        session_state: Any = None,
+        context: dict[str, Any] = {},
+    ) -> dict[str, Any]:
+        q = messages[-1]["content"]
+        if not isinstance(q, str):
+            raise ValueError("The most recent message content must be a string.")
+        overrides = context.get("overrides", {})
+        seed = overrides.get("seed", None)
+        auth_claims = context.get("auth_claims", {})
+        use_text_search = overrides.get("retrieval_mode") in ["text", "hybrid", None]
+        use_vector_search = overrides.get("retrieval_mode") in ["vectors", "hybrid", None]
+        use_semantic_ranker = True if overrides.get("semantic_ranker") else False
+        use_semantic_captions = True if overrides.get("semantic_captions") else False
+        top = overrides.get("top", 3)
+        minimum_search_score = overrides.get("minimum_search_score", 0.0)
+        minimum_reranker_score = overrides.get("minimum_reranker_score", 0.0)
+        filter = self.build_filter(overrides, auth_claims)
 
         # If retrieval mode includes vectors, compute an embedding for the query
-        if has_vector:
-            query_vector = openai.Embedding.create(engine=self.embedding_deployment, input=q)["data"][0]["embedding"]
-        else:
-            query_vector = None
+        vectors: list[VectorQuery] = []
+        if use_vector_search:
+            vectors.append(await self.compute_text_embedding(q))
 
-        # Only keep the text query if the retrieval mode uses text, otherwise drop it
-        query_text = q if has_text else None
+        results = await self.search(
+            top,
+            q,
+            filter,
+            vectors,
+            use_text_search,
+            use_vector_search,
+            use_semantic_ranker,
+            use_semantic_captions,
+            minimum_search_score,
+            minimum_reranker_score,
+        )
 
-        # Use semantic ranker if requested and if retrieval mode is text or hybrid (vectors + text)
-        if overrides.get("semantic_ranker") and has_text:
-            r = self.search_client.search(query_text, 
-                                          filter=filter,
-                                          query_type=QueryType.SEMANTIC, 
-                                          query_language="en-us", 
-                                          query_speller="lexicon", 
-                                          semantic_configuration_name="default", 
-                                          top=top, 
-                                          query_caption="extractive|highlight-false" if use_semantic_captions else None,
-                                          vector=query_vector, 
-                                          top_k=50 if query_vector else None, 
-                                          vector_fields="embedding" if query_vector else None)
-        else:
-            r = self.search_client.search(query_text, 
-                                          filter=filter, 
-                                          top=top, 
-                                          vector=query_vector, 
-                                          top_k=50 if query_vector else None, 
-                                          vector_fields="embedding" if query_vector else None)
-        if use_semantic_captions:
-            results = [doc[self.sourcepage_field] + ": " + nonewlines(" . ".join([c.text for c in doc['@search.captions']])) for doc in r]
-        else:
-            results = [doc[self.sourcepage_field] + ": " + nonewlines(doc[self.content_field]) for doc in r]
-        content = "\n".join(results)
+        # Process results
+        text_sources = self.get_sources_content(results, use_semantic_captions, use_image_citation=False)
+        rendered_answer_prompt = self.prompt_manager.render_prompt(
+            self.answer_prompt,
+            self.get_system_prompt_variables(overrides.get("prompt_template"))
+            | {"user_query": q, "text_sources": text_sources},
+        )
 
-        message_builder = MessageBuilder(overrides.get("prompt_template") or self.system_chat_template, self.chatgpt_model);
+        chat_completion = await self.openai_client.chat.completions.create(
+            # Azure OpenAI takes the deployment name as the model name
+            model=self.chatgpt_deployment if self.chatgpt_deployment else self.chatgpt_model,
+            messages=rendered_answer_prompt.all_messages,
+            temperature=overrides.get("temperature", 0.3),
+            max_tokens=1024,
+            n=1,
+            seed=seed,
+        )
 
-        # add user question
-        user_content = q + "\n" + "Sources:\n {content}".format(content=content)
-        message_builder.append_message('user', user_content)
+        extra_info = {
+            "data_points": {"text": text_sources},
+            "thoughts": [
+                ThoughtStep(
+                    "Search using user query",
+                    q,
+                    {
+                        "use_semantic_captions": use_semantic_captions,
+                        "use_semantic_ranker": use_semantic_ranker,
+                        "top": top,
+                        "filter": filter,
+                        "use_vector_search": use_vector_search,
+                        "use_text_search": use_text_search,
+                    },
+                ),
+                ThoughtStep(
+                    "Search results",
+                    [result.serialize_for_results() for result in results],
+                ),
+                ThoughtStep(
+                    "Prompt to generate answer",
+                    rendered_answer_prompt.all_messages,
+                    (
+                        {"model": self.chatgpt_model, "deployment": self.chatgpt_deployment}
+                        if self.chatgpt_deployment
+                        else {"model": self.chatgpt_model}
+                    ),
+                ),
+            ],
+        }
 
-        # Add shots/samples. This helps model to mimic response and make sure they match rules laid out in system message.
-        message_builder.append_message('assistant', self.answer)
-        message_builder.append_message('user', self.question)
-        
-        messages = message_builder.messages
-        chat_completion = openai.ChatCompletion.create(
-            deployment_id=self.openai_deployment,
-            model=self.chatgpt_model,
-            messages=messages, 
-            temperature=overrides.get("temperature") or 0.3, 
-            max_tokens=1024, 
-            n=1)
-        
-        return {"data_points": results, "answer": chat_completion.choices[0].message.content, "thoughts": f"Question:<br>{query_text}<br><br>Prompt:<br>" + '\n\n'.join([str(message) for message in messages])}
+        return {
+            "message": {
+                "content": chat_completion.choices[0].message.content,
+                "role": chat_completion.choices[0].message.role,
+            },
+            "context": extra_info,
+            "session_state": session_state,
+        }
