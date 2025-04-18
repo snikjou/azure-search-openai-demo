@@ -1,6 +1,6 @@
 {
-    "pageTitle": "Lottery ChatBot",
-    "headerTitle": "Lottery ChatBot",
+    "pageTitle": "Oregon State Police ChatBot",
+    "headerTitle": "Oregon State Police ChatBot",
     "chat": "Chat",
     "qa": "Ask a question",
     "login": "Login",
@@ -34,13 +34,13 @@
     },
     "developerSettings": "Developer settings",
 
-    "chatEmptyStateTitle": "Lottery ChatBot",
+    "chatEmptyStateTitle": "Oregon State Police ChatBot",
     "chatEmptyStateSubtitle": "Ask anything or try an example",
     "defaultExamples": {
-        "1": "What is included in my Northwind Health Plus plan that is not in standard?",
-        "2": "What happens in a performance review?",
-        "3": "What does a Product Manager do?",
-        "placeholder": "Type a new question (e.g. does my plan cover annual eye exams?)"
+        "1": "Summarize the key findings and activities outlined in the 2023 Oregon State Police Annual Report.",
+        "2": "Identify notable crime trends and public safety challenges in Oregon.",
+        "3": "How technology and data systems, such as CJIS and LEDS, supported Oregon State Police?",
+        "placeholder": "Type a new question (e.g. What is the Annual Report (OSP)?)"
     },
     "askTitle": "Ask your data",
     "gpt4vExamples": {
